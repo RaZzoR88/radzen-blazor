@@ -1,0 +1,263 @@
+@using RadzenBlazorDemos.Models
+@using Radzen.Blazor
+@inject TooltipService TooltipService
+@inject ContextMenuService ContextMenuService
+
+<RadzenText TextStyle="TextStyle.Body1" class="rz-mb-4">
+    Hover over a task bar to reveal the <strong>connector handles</strong> (circles) at each end.
+    Drag from one handle to another bar's handle to create a dependency — the type is inferred
+    automatically from the handle combination (End→Start, Start→Start, etc.).
+    <strong>Double-click</strong> a dependency line to delete it.
+    <strong>Double-click</strong> a task label to edit it inline.
+    <strong>Right-click</strong> a task bar or dependency line for a context menu.
+    <strong>Hover</strong> a dependency line to see a tooltip.
+</RadzenText>
+
+@* Inline label editor — positioned at the label via fixed coordinates *@
+@if (editingTask != null)
+{
+    <div style="position:fixed;inset:0;z-index:999;cursor:default;" @onclick="CommitEdit"></div>
+    <input @ref="editInput"
+           class="rz-gantt-label-editor"
+           style="position:fixed;left:@(editX)px;top:@(editY)px;height:@(editH)px;min-width:@(Math.Max(editW, 140))px;z-index:1000;"
+           value="@editValue"
+           @oninput="e => editValue = e.Value?.ToString() ?? editValue"
+           @onkeydown="OnEditKeyDown"
+           @onkeydown:stopPropagation="true"
+           @onclick:stopPropagation="true" />
+}
+
+<RadzenGantt @ref="gantt" TItem="GanttTask"
+             Data="@tasks"
+             DependencyData="@dependencies"
+             DependencyFromProperty="@nameof(GanttTaskDependency.PredecessorId)"
+             DependencyToProperty="@nameof(GanttTaskDependency.SuccessorId)"
+             DependencyTypeProperty="@nameof(GanttTaskDependency.Type)"
+             IdProperty="@nameof(GanttTask.Id)"
+             ParentIdProperty="@nameof(GanttTask.ParentId)"
+             TextProperty="@nameof(GanttTask.Name)"
+             StartProperty="@nameof(GanttTask.Start)"
+             EndProperty="@nameof(GanttTask.End)"
+             ProgressProperty="@nameof(GanttTask.Progress)"
+             TaskLabelPosition="GanttTaskLabelPosition.Right"
+             AllowDependencyCreate="true"
+             DependencyCreate="@OnDependencyCreate"
+             DependencyDoubleClick="@OnDependencyDoubleClick"
+             DependencyContextMenu="@OnDependencyContextMenu"
+             DependencyMouseEnter="@OnDependencyMouseEnter"
+             DependencyMouseLeave="@OnDependencyMouseLeave"
+             TaskContextMenu="@OnTaskContextMenu"
+             TaskLabelDoubleClick="@OnTaskLabelDoubleClick"
+             Style="width: 100%; height: 520px;">
+    <Columns>
+        <RadzenGanttColumn Title="Task" Property="@nameof(GanttTask.Name)" Frozen="true" Width="200px" />
+        <RadzenGanttColumn Title="Start" Property="@nameof(GanttTask.Start)" Width="110px" FormatString="{0:d}" />
+        <RadzenGanttColumn Title="End" Property="@nameof(GanttTask.End)" Width="110px" FormatString="{0:d}" />
+    </Columns>
+</RadzenGantt>
+
+@if (log.Count > 0)
+{
+    <RadzenCard class="rz-mt-4" Style="max-height:160px;overflow-y:auto;">
+        <RadzenText TextStyle="TextStyle.Subtitle2">Activity Log</RadzenText>
+        @foreach (var entry in Enumerable.Reverse(log))
+        {
+            <RadzenText TextStyle="TextStyle.Body2">@entry</RadzenText>
+        }
+    </RadzenCard>
+}
+
+@code {
+    RadzenGantt<GanttTask> gantt;
+    ElementReference editInput;
+
+    // ── Inline label editor state ────────────────────────────────────────
+    GanttTask editingTask = null;
+    string editValue = "";
+    double editX, editY, editH, editW;
+
+    List<GanttTask> tasks;
+    List<GanttTaskDependency> dependencies;
+    List<string> log = new();
+
+    protected override void OnInitialized()
+    {
+        var today = DateTime.Today;
+
+        tasks = new()
+        {
+            new() { Id = 1, Name = "Project Alpha", Start = today, End = today.AddDays(28), Progress = 35 },
+
+            new() { Id = 2, ParentId = 1, Name = "Phase 1 – Planning", Start = today, End = today.AddDays(7), Progress = 100 },
+            new() { Id = 3, ParentId = 2, Name = "Requirements", Start = today, End = today.AddDays(3), Progress = 100 },
+            new() { Id = 4, ParentId = 2, Name = "Architecture", Start = today.AddDays(3), End = today.AddDays(7), Progress = 100 },
+
+            new() { Id = 5, ParentId = 1, Name = "Phase 2 – Development", Start = today.AddDays(7), End = today.AddDays(21), Progress = 25 },
+            new() { Id = 6, ParentId = 5, Name = "Backend API", Start = today.AddDays(7), End = today.AddDays(14), Progress = 50 },
+            new() { Id = 7, ParentId = 5, Name = "Frontend UI", Start = today.AddDays(7), End = today.AddDays(18), Progress = 15 },
+            new() { Id = 8, ParentId = 5, Name = "Integration", Start = today.AddDays(14), End = today.AddDays(21), Progress = 0 },
+
+            new() { Id = 9, ParentId = 1, Name = "Phase 3 – Release", Start = today.AddDays(21), End = today.AddDays(28), Progress = 0 },
+            new() { Id = 10, ParentId = 9, Name = "QA Testing", Start = today.AddDays(21), End = today.AddDays(25), Progress = 0 },
+            new() { Id = 11, ParentId = 9, Name = "Deployment", Start = today.AddDays(25), End = today.AddDays(28), Progress = 0 },
+        };
+
+        dependencies = new()
+        {
+            new() { PredecessorId = 3, SuccessorId = 4, Type = GanttDependencyType.FinishToStart },
+            new() { PredecessorId = 4, SuccessorId = 6, Type = GanttDependencyType.FinishToStart },
+            new() { PredecessorId = 4, SuccessorId = 7, Type = GanttDependencyType.FinishToStart },
+            new() { PredecessorId = 6, SuccessorId = 8, Type = GanttDependencyType.FinishToStart },
+            new() { PredecessorId = 8, SuccessorId = 10, Type = GanttDependencyType.FinishToStart },
+            new() { PredecessorId = 10, SuccessorId = 11, Type = GanttDependencyType.FinishToStart },
+        };
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await gantt.ExpandRows(tasks);
+        }
+    }
+
+    // ── Dependency events ────────────────────────────────────────────────
+
+    void OnDependencyCreate(GanttDependencyCreatedEventArgs<GanttTask> args)
+    {
+        var exists = dependencies.Any(d =>
+            d.PredecessorId == args.From.Id &&
+            d.SuccessorId == args.To.Id &&
+            d.Type == args.Type);
+
+        if (!exists)
+        {
+            dependencies.Add(new GanttTaskDependency
+            {
+                PredecessorId = args.From.Id,
+                SuccessorId = args.To.Id,
+                Type = args.Type
+            });
+            log.Add($"✅ Created: \"{args.From.Name}\" → \"{args.To.Name}\" ({args.Type})");
+        }
+        else
+        {
+            log.Add($"⚠️ Skipped duplicate: \"{args.From.Name}\" → \"{args.To.Name}\" ({args.Type})");
+        }
+    }
+
+    void OnDependencyDoubleClick(GanttDependencyMouseEventArgs<GanttTask> args)
+    {
+        DeleteDependency(args.From, args.To, args.Type);
+    }
+
+    void OnDependencyContextMenu(GanttDependencyMouseEventArgs<GanttTask> args)
+    {
+        ContextMenuService.Open(new MouseEventArgs { ClientX = args.ClientX, ClientY = args.ClientY },
+            new List<ContextMenuItem>
+            {
+                new() { Text = "Delete dependency", Icon = "delete", Value = args }
+            },
+            e =>
+            {
+                if (e.Value is GanttDependencyMouseEventArgs<GanttTask> dep)
+                {
+                    DeleteDependency(dep.From, dep.To, dep.Type);
+                }
+                ContextMenuService.Close();
+                InvokeAsync(StateHasChanged);
+            });
+    }
+
+    void DeleteDependency(GanttTask from, GanttTask to, GanttDependencyType type)
+    {
+        var removed = dependencies.RemoveAll(d =>
+            d.PredecessorId == from.Id &&
+            d.SuccessorId == to.Id &&
+            d.Type == type);
+
+        if (removed > 0)
+        {
+            log.Add($"🗑️ Deleted: \"{from.Name}\" → \"{to.Name}\" ({type})");
+        }
+    }
+
+    void OnDependencyMouseEnter(GanttDependencyMouseEventArgs<GanttTask> args)
+    {
+        TooltipService.OpenAtPosition(args.ClientX + 14, args.ClientY - 8, ts =>
+            @<RadzenStack Orientation="Orientation.Vertical" Gap="2px" class="rz-p-2">
+                <RadzenText TextStyle="TextStyle.Subtitle2" Style="color:var(--rz-tooltip-color);">
+                    Dependency
+                </RadzenText>
+                <RadzenStack Orientation="Orientation.Horizontal" Gap="4px" AlignItems="AlignItems.Center">
+                    <RadzenBadge Text="@args.From.Name" BadgeStyle="BadgeStyle.Primary" />
+                    <RadzenIcon Icon="arrow_forward" Style="color:var(--rz-tooltip-color);font-size:1rem;" />
+                    <RadzenBadge Text="@args.To.Name" BadgeStyle="BadgeStyle.Secondary" />
+                </RadzenStack>
+                <RadzenText TextStyle="TextStyle.Caption" Style="color:var(--rz-tooltip-color);opacity:0.8;">
+                    @args.Type.ToString()
+                </RadzenText>
+            </RadzenStack>,
+            new TooltipOptions { Duration = null });
+    }
+
+    void OnDependencyMouseLeave(GanttDependencyMouseEventArgs<GanttTask> args)
+    {
+        TooltipService.Close();
+    }
+
+    // ── Task events ──────────────────────────────────────────────────────
+
+    void OnTaskContextMenu(GanttTaskMouseEventArgs<GanttTask> args)
+    {
+        ContextMenuService.Open(new MouseEventArgs { ClientX = args.ClientX, ClientY = args.ClientY },
+            new List<ContextMenuItem>
+            {
+                new() { Text = "Edit task", Icon = "edit", Value = args.Data },
+                new() { Text = "Delete task", Icon = "delete", Value = args.Data }
+            },
+            e =>
+            {
+                if (e.Value is GanttTask task)
+                {
+                    log.Add($"📋 Context menu: \"{e.Text}\" on \"{task.Name}\"");
+                }
+                ContextMenuService.Close();
+            });
+    }
+
+    // ── Inline label editing ─────────────────────────────────────────────
+
+    async Task OnTaskLabelDoubleClick(GanttTaskMouseEventArgs<GanttTask> args)
+    {
+        editingTask = args.Data;
+        editValue = args.Data.Name ?? "";
+        // args.ClientX/Y is the label element's top-left corner in viewport coordinates.
+        // args.LabelWidth/LabelHeight is the label's bounding rect size.
+        editX = args.ClientX;
+        editY = args.ClientY;
+        editH = args.LabelHeight > 0 ? args.LabelHeight : 22;
+        editW = args.LabelWidth > 0 ? args.LabelWidth : 140;
+        await InvokeAsync(StateHasChanged);
+        await Task.Delay(30);
+        try { await editInput.FocusAsync(); } catch { }
+    }
+
+    async Task CommitEdit()
+    {
+        if (editingTask == null) return;
+        if (!string.IsNullOrWhiteSpace(editValue) && editValue != editingTask.Name)
+        {
+            editingTask.Name = editValue;
+            log.Add($"✏️ Renamed to \"{editValue}\"");
+            await gantt.Reload();
+        }
+        editingTask = null;
+    }
+
+    async Task OnEditKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await CommitEdit();
+        else if (e.Key == "Escape") { editingTask = null; }
+    }
+}

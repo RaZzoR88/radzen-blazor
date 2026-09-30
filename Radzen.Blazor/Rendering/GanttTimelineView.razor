@@ -100,6 +100,31 @@
                                                              Click=@OnAppointmentClick
                                                              DragStart=@OnAppointmentDragStart
                                                              AdditionalAttributes=@MergeAttributes(GetBarAttributes(appointment), barRenderArgs.extraAttrs) />
+            
+                                                @if (AllowDependencyCreate)
+                                                {
+                                                    var handleTopPx = (topEm + heightEm * 0.5) * RowHeightPx;
+                                                    // Handle radius = 7px. We want the circle CENTER 10px outside the bar edge.
+                                                    // left = left-edge of the 14px element, center = left + 7px.
+                                                    // Start: center at barLeft% - 10px  → left = barLeft% - 17px
+                                                    // End:   center at barRight% + 10px → left = barRight% + 3px  (= barLeft% + width% + 3px)
+                                                    var hoverZoneLeft  = "calc(" + placement.Value.LeftPercent.ToInvariantString() + "% - 24px)";
+                                                    var hoverZoneWidth = "calc(" + placement.Value.WidthPercent.ToInvariantString() + "% + 48px)";
+                                                    var startLeft = "calc(" + placement.Value.LeftPercent.ToInvariantString() + "% - 17px)";
+                                                    var endLeft   = "calc(" + placement.Value.LeftPercent.ToInvariantString() + "% + " + placement.Value.WidthPercent.ToInvariantString() + "% + 3px)";
+                                                    // Hover-zone BEFORE handles (CSS ~ selector requires this order).
+                                                    // Extended 20px on each side so mouse can reach handles without leaving zone.
+                                                    <span class="rz-gantt-bar-hover-zone"
+                                                          style="@($"left:{hoverZoneLeft};width:{hoverZoneWidth};top:{(topEm * RowHeightPx).ToInvariantString()}px;height:{(heightEm * RowHeightPx).ToInvariantString()}px;")"></span>
+                                                    <span class="rz-gantt-connector rz-gantt-connector-start"
+                                                          data-connector-side="start"
+                                                          style="@($"left:{startLeft};top:{handleTopPx.ToInvariantString()}px;")"
+                                                          title="Drag to create dependency"></span>
+                                                    <span class="rz-gantt-connector rz-gantt-connector-end"
+                                                          data-connector-side="end"
+                                                          style="@($"left:{endLeft};top:{handleTopPx.ToInvariantString()}px;")"
+                                                          title="Drag to create dependency"></span>
+                                                }
                                             }
                                         }
                                     }
@@ -110,7 +135,7 @@
                 }
             </tbody>
         </table>
-        <svg class="rz-gantt-links" style="@($"width:{TimelineWidthPx}px;height:{RowCount * RowHeightPx}px;")">
+        <svg class="rz-gantt-links @(AllowDependencyInteraction || AllowDependencyHover ? "rz-gantt-links-interactive" : "")" style="@($"width:{TimelineWidthPx}px;height:{RowCount * RowHeightPx}px;")">
             <defs>
                 <marker id="rz-gantt-link-arrow-end" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
                     <path d="M0,0 L6,3 L0,6 Z" class="rz-gantt-link-arrow" />
@@ -123,7 +148,12 @@
             {
                 var isCritical = link.CssClass != null && link.CssClass.Contains("critical");
                 var markerUrl = isCritical ? "url(#rz-gantt-link-arrow-end-critical)" : "url(#rz-gantt-link-arrow-end)";
-                <path d="@BuildLinkPath(link)" class="@(link.CssClass ?? "rz-gantt-link")" marker-end="@markerUrl"
+                var hitInteractive = AllowDependencyInteraction || AllowDependencyHover;
+                var hitClass = hitInteractive ? "rz-gantt-link-hit" : "rz-gantt-link-hit rz-gantt-link-hit-inert";
+                // Visible path - unchanged styling
+                <path d="@BuildLinkPath(link)" class="@(link.CssClass ?? "rz-gantt-link")" marker-end="@markerUrl" />
+                // Hit-area path: wide invisible stroke for easy mouse targeting
+                <path d="@BuildLinkPath(link)" class="@hitClass"
                       data-from-index="@link.FromIndex" data-to-index="@link.ToIndex" data-link-type="@((int)link.Type)" />
             }
         </svg>
@@ -214,6 +244,18 @@
     [Parameter]
     public Action<GanttBarRenderEventArgs<TItem>>? TaskRender { get; set; }
 
+    [Parameter]
+    public GanttTaskLabelPosition TaskLabelPosition { get; set; } = GanttTaskLabelPosition.Inside;
+
+    [Parameter]
+    public bool AllowDependencyCreate { get; set; }
+
+    [Parameter]
+    public bool AllowDependencyInteraction { get; set; }
+
+    [Parameter]
+    public bool AllowDependencyHover { get; set; }
+
     [CascadingParameter]
     public IScheduler? Scheduler { get; set; }
 
@@ -226,6 +268,15 @@
     private DotNetObjectReference<GanttTimelineView<TItem>>? dotnetRef;
 
     private static bool IsMilestone(AppointmentData appointment) => appointment.Start == appointment.End;
+
+    private int GetAppointmentIndex(AppointmentData appointment)
+    {
+        if (appointmentIndices != null && appointmentIndices.TryGetValue(appointment, out var idx))
+        {
+            return idx;
+        }
+        return -1;
+    }
 
     private (string barCss, IDictionary<string, object>? extraAttrs) GetBarRenderArgs(AppointmentData appointment, bool isCritical)
     {
@@ -296,19 +347,128 @@
         await Gantt.HandleTaskBarInteraction(appointment, mode, newStart, newEnd);
     }
 
+    /// <summary>
+    /// Called from JS when the user finishes drawing a new dependency link.
+    /// <paramref name="fromIndex"/> and <paramref name="toIndex"/> are flat appointment indices.
+    /// <paramref name="depType"/> is the integer value of <see cref="GanttDependencyType"/>
+    /// (0=FinishToStart, 1=StartToStart, 2=FinishToFinish, 3=StartToFinish).
+    /// </summary>
+    [JSInvokable]
+    public async Task OnGanttDependencyCreate(int fromIndex, int toIndex, int depType)
+    {
+        if (Gantt == null || flatAppointments == null)
+        {
+            return;
+        }
+
+        if (fromIndex < 0 || fromIndex >= flatAppointments.Count ||
+            toIndex < 0 || toIndex >= flatAppointments.Count ||
+            fromIndex == toIndex)
+        {
+            return;
+        }
+
+        var fromAppointment = flatAppointments[fromIndex];
+        var toAppointment = flatAppointments[toIndex];
+        var type = (GanttDependencyType)depType;
+
+        await Gantt.HandleDependencyCreate(fromAppointment, toAppointment, type);
+    }
+
+    private bool ValidDepIndices(int fromIndex, int toIndex) =>
+        Gantt != null && flatAppointments != null &&
+        fromIndex >= 0 && fromIndex < flatAppointments.Count &&
+        toIndex >= 0 && toIndex < flatAppointments.Count;
+
+    [JSInvokable]
+    public async Task OnGanttDependencyClick(int fromIndex, int toIndex, int depType, double clientX, double clientY)
+    {
+        if (ValidDepIndices(fromIndex, toIndex))
+            await Gantt!.HandleDependencyClick(flatAppointments![fromIndex], flatAppointments[toIndex], (GanttDependencyType)depType, clientX, clientY);
+    }
+
+    [JSInvokable]
+    public async Task OnGanttDependencyDoubleClick(int fromIndex, int toIndex, int depType, double clientX, double clientY)
+    {
+        if (ValidDepIndices(fromIndex, toIndex))
+            await Gantt!.HandleDependencyDoubleClick(flatAppointments![fromIndex], flatAppointments[toIndex], (GanttDependencyType)depType, clientX, clientY);
+    }
+
+    [JSInvokable]
+    public async Task OnGanttDependencyContextMenu(int fromIndex, int toIndex, int depType, double clientX, double clientY)
+    {
+        if (ValidDepIndices(fromIndex, toIndex))
+            await Gantt!.HandleDependencyContextMenu(flatAppointments![fromIndex], flatAppointments[toIndex], (GanttDependencyType)depType, clientX, clientY);
+    }
+
+    [JSInvokable]
+    public async Task OnGanttTaskDoubleClick(int index, double clientX, double clientY)
+    {
+        if (Gantt != null && flatAppointments != null && index >= 0 && index < flatAppointments.Count)
+        {
+            await Gantt.HandleTaskDoubleClick(flatAppointments[index], clientX, clientY);
+        }
+    }
+
+    [JSInvokable]
+    public async Task OnGanttTaskLabelDoubleClick(int index, double labelLeft, double labelTop, double labelWidth, double labelHeight)
+    {
+        if (Gantt != null && flatAppointments != null && index >= 0 && index < flatAppointments.Count)
+        {
+            await Gantt.HandleTaskLabelDoubleClick(flatAppointments[index], labelLeft, labelTop, labelWidth, labelHeight);
+        }
+    }
+
+    [JSInvokable]
+    public async Task OnGanttTaskContextMenu(int index, double clientX, double clientY)
+    {
+        if (Gantt != null && flatAppointments != null && index >= 0 && index < flatAppointments.Count)
+            await Gantt.HandleTaskContextMenu(flatAppointments[index], clientX, clientY);
+    }
+
+    [JSInvokable]
+    public async Task OnGanttDependencyMouseEnter(int fromIndex, int toIndex, int depType, double clientX, double clientY)
+    {
+        if (Gantt != null && flatAppointments != null &&
+            fromIndex >= 0 && fromIndex < flatAppointments.Count &&
+            toIndex >= 0 && toIndex < flatAppointments.Count)
+        {
+            await Gantt.HandleDependencyMouseEnter(flatAppointments[fromIndex], flatAppointments[toIndex], (GanttDependencyType)depType, clientX, clientY);
+        }
+    }
+
+    [JSInvokable]
+    public async Task OnGanttDependencyMouseLeave(int fromIndex, int toIndex, int depType, double clientX, double clientY)
+    {
+        if (Gantt != null && flatAppointments != null &&
+            fromIndex >= 0 && fromIndex < flatAppointments.Count &&
+            toIndex >= 0 && toIndex < flatAppointments.Count)
+        {
+            await Gantt.HandleDependencyMouseLeave(flatAppointments[fromIndex], flatAppointments[toIndex], (GanttDependencyType)depType, clientX, clientY);
+        }
+    }
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         var allowDrag = Gantt?.TaskMove.HasDelegate == true;
         var allowResize = Gantt?.TaskResize.HasDelegate == true;
+        var allowDepCreate = AllowDependencyCreate;
+        var allowDepInteract = AllowDependencyInteraction;
+        var allowDepHover = AllowDependencyHover;
+        var allowTaskDblClick = Gantt?.TaskDoubleClick.HasDelegate == true;
+        var allowTaskCtxMenu = Gantt?.TaskContextMenu.HasDelegate == true;
+        var allowTaskLabelDblClick = Gantt?.TaskLabelDoubleClick.HasDelegate == true;
 
-        if (allowDrag || allowResize)
+        if (allowDrag || allowResize || allowDepCreate || allowDepInteract || allowDepHover || allowTaskDblClick || allowTaskCtxMenu || allowTaskLabelDblClick)
         {
             dotnetRef ??= DotNetObjectReference.Create(this);
             var timelineRangeMs = (EndDate - StartDate).TotalMilliseconds;
             var ganttId = Gantt?.GanttElementId;
             if (ganttId != null)
             {
-                await JSRuntime.InvokeVoidAsync("Radzen.ganttInitDragResize", ganttId, dotnetRef, timelineRangeMs, allowDrag, allowResize, RowHeightPx);
+                await JSRuntime.InvokeVoidAsync("Radzen.ganttInitDragResize", ganttId, dotnetRef, timelineRangeMs,
+                    allowDrag, allowResize, RowHeightPx, allowDepCreate, allowDepInteract, allowDepHover,
+                    allowTaskDblClick, allowTaskCtxMenu, allowTaskLabelDblClick);
             }
         }
     }

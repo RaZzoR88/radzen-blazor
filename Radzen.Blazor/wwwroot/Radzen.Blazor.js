@@ -357,6 +357,12 @@ window.Radzen = {
       Radzen[key].allowDrag = allowDrag;
       Radzen[key].allowResize = allowResize;
       Radzen[key].rowHeightPx = rowHeightPx || 36;
+      Radzen[key].allowDepCreate = allowDepCreate || false;
+      Radzen[key].allowDepInteract = allowDepInteract || false;
+      Radzen[key].allowDepHover = allowDepHover || false;
+      Radzen[key].allowTaskDblClick = allowTaskDblClick || false;
+      Radzen[key].allowTaskCtxMenu = allowTaskCtxMenu || false;
+      Radzen[key].allowTaskLabelDblClick = allowTaskLabelDblClick || false;
       return;
     }
 
@@ -590,9 +596,348 @@ window.Radzen = {
       }
     }
 
+    // ── Dependency connector drag ──────────────────────────────────────────
+    var depDrag = null;
+    var depRubberLine = null;
+
+    function depTypeFromSides(fromSide, toSide) {
+      if (fromSide === 'end'   && toSide === 'start') return 0;
+      if (fromSide === 'start' && toSide === 'start') return 1;
+      if (fromSide === 'end'   && toSide === 'end')   return 2;
+      if (fromSide === 'start' && toSide === 'end')   return 3;
+      return 0;
+    }
+
+    // Returns {x,y} of bar start/end edge in SVG coordinate space.
+    function getBarPointInSvg(bar, side, svg) {
+      var svgRect = svg.getBoundingClientRect();
+      var barRect = bar.getBoundingClientRect();
+      var x = side === 'start' ? barRect.left - svgRect.left : barRect.right - svgRect.left;
+      var y = barRect.top - svgRect.top + barRect.height / 2;
+      return { x: x, y: y };
+    }
+
+    function ensureRubberLine(svg) {
+      if (!depRubberLine) {
+        depRubberLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        depRubberLine.setAttribute('class', 'rz-gantt-dep-rubber');
+        depRubberLine.style.stroke = 'var(--rz-primary, #3f51b5)';
+        depRubberLine.style.strokeWidth = '2';
+        depRubberLine.style.strokeDasharray = '6 3';
+        depRubberLine.style.pointerEvents = 'none';
+        svg.appendChild(depRubberLine);
+      }
+      return depRubberLine;
+    }
+
+    function removeRubberLine() {
+      if (depRubberLine && depRubberLine.parentNode) {
+        depRubberLine.parentNode.removeChild(depRubberLine);
+      }
+      depRubberLine = null;
+    }
+
+    function onDepMouseDown(e) {
+      var config = getConfig();
+      if (!config || !config.allowDepCreate) return;
+      var handle = e.target.closest('.rz-gantt-connector');
+      if (!handle || e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      var fromSide = handle.dataset.connectorSide;
+      var rowContainer = handle.closest('.rz-gantt-row-container');
+      if (!rowContainer) return;
+
+      // Find the nearest bar by horizontal proximity to the handle
+      var bars = rowContainer.querySelectorAll('.rz-event[data-index]');
+      var handleRect = handle.getBoundingClientRect();
+      var handleCX = handleRect.left + handleRect.width / 2;
+      var bar = null;
+      var minDist = Infinity;
+      for (var i = 0; i < bars.length; i++) {
+        var br = bars[i].getBoundingClientRect();
+        var dist = Math.abs(handleCX - (br.left + br.width / 2));
+        if (dist < minDist) { minDist = dist; bar = bars[i]; }
+      }
+      if (!bar || !bar.dataset.index) return;
+
+      var svg = container.querySelector('.rz-gantt-links');
+      if (!svg) return;
+
+      var pt = getBarPointInSvg(bar, fromSide, svg);
+      depDrag = { fromBar: bar, fromIndex: parseInt(bar.dataset.index, 10), fromSide: fromSide, svg: svg };
+
+      var line = ensureRubberLine(svg);
+      line.setAttribute('x1', pt.x);
+      line.setAttribute('y1', pt.y);
+      line.setAttribute('x2', pt.x);
+      line.setAttribute('y2', pt.y);
+
+      document.addEventListener('mousemove', onDepMouseMove);
+      document.addEventListener('mouseup', onDepMouseUp);
+    }
+
+    // Forward hover-zone mousedown to the bar underneath (for drag/resize/click)
+    function onHoverZoneMouseDown(e) {
+      var config = getConfig();
+      if (!config) return;
+      // Only forward if NOT clicking a connector handle
+      if (e.target.closest('.rz-gantt-connector')) return;
+      var zone = e.target.closest('.rz-gantt-bar-hover-zone');
+      if (!zone) return;
+      // Find the bar in the same row-container
+      var rc = zone.closest('.rz-gantt-row-container');
+      if (!rc) return;
+      var bar = rc.querySelector('.rz-event[data-index]');
+      if (bar) {
+        // Dispatch a synthetic mousedown on the bar so drag/resize still works
+        bar.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: e.clientX, clientY: e.clientY, button: e.button }));
+      }
+    }
+
+    function onDepMouseMove(e) {
+      if (!depDrag || !depDrag.svg) return;
+      var svgRect = depDrag.svg.getBoundingClientRect();
+      var x = e.clientX - svgRect.left;
+      var y = e.clientY - svgRect.top;
+      if (depRubberLine) {
+        depRubberLine.setAttribute('x2', x);
+        depRubberLine.setAttribute('y2', y);
+      }
+
+      var el = document.elementFromPoint(e.clientX, e.clientY);
+      var hoverBar = null;
+
+      // Check if over a connector handle → find its bar
+      var overHandle = el ? el.closest('.rz-gantt-connector') : null;
+      if (overHandle) {
+        var rc = overHandle.closest('.rz-gantt-row-container');
+        if (rc) {
+          var bars = rc.querySelectorAll('.rz-event[data-index]');
+          var hCX = overHandle.getBoundingClientRect().left + 7;
+          var minDist = Infinity;
+          for (var i = 0; i < bars.length; i++) {
+            var br = bars[i].getBoundingClientRect();
+            var dist = Math.abs(hCX - (br.left + br.width / 2));
+            if (dist < minDist) { minDist = dist; hoverBar = bars[i]; }
+          }
+        }
+      } else {
+        hoverBar = el ? el.closest('.rz-event[data-index]') : null;
+        if (!hoverBar) {
+          var zone = el ? el.closest('.rz-gantt-bar-hover-zone') : null;
+          if (zone) {
+            var rc2 = zone.closest('.rz-gantt-row-container');
+            if (rc2) {
+              var bars2 = rc2.querySelectorAll('.rz-event[data-index]');
+              for (var j = 0; j < bars2.length; j++) {
+                var br2 = bars2[j].getBoundingClientRect();
+                if (e.clientX >= br2.left - 24 && e.clientX <= br2.right + 24 &&
+                    e.clientY >= br2.top && e.clientY <= br2.bottom) {
+                  hoverBar = bars2[j];
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      container.querySelectorAll('.rz-gantt-dep-target').forEach(function(b) { b.classList.remove('rz-gantt-dep-target'); });
+      if (hoverBar && hoverBar !== depDrag.fromBar) hoverBar.classList.add('rz-gantt-dep-target');
+    }
+
+    function onDepMouseUp(e) {
+      if (!depDrag) return;
+      document.removeEventListener('mousemove', onDepMouseMove);
+      document.removeEventListener('mouseup', onDepMouseUp);
+      removeRubberLine();
+      container.querySelectorAll('.rz-gantt-dep-target').forEach(function(b) { b.classList.remove('rz-gantt-dep-target'); });
+
+      var el = document.elementFromPoint(e.clientX, e.clientY);
+
+      // Determine which handle / bar the mouse was released on.
+      // Handles are spans in the row-container (not inside .rz-event), so
+      // closest('.rz-event') won't work from a handle element.
+      var toHandle = el ? el.closest('.rz-gantt-connector') : null;
+      var toBar = null;
+
+      if (toHandle) {
+        // Released on a connector handle → find its bar by proximity in the same row
+        var rc = toHandle.closest('.rz-gantt-row-container');
+        if (rc) {
+          var bars = rc.querySelectorAll('.rz-event[data-index]');
+          var hRect = toHandle.getBoundingClientRect();
+          var hCX = hRect.left + hRect.width / 2;
+          var minDist = Infinity;
+          for (var i = 0; i < bars.length; i++) {
+            var br = bars[i].getBoundingClientRect();
+            var dist = Math.abs(hCX - (br.left + br.width / 2));
+            if (dist < minDist) { minDist = dist; toBar = bars[i]; }
+          }
+        }
+      } else {
+        // Released on a bar or hover-zone
+        toBar = el ? el.closest('.rz-event[data-index]') : null;
+        if (!toBar) {
+          var zone = el ? el.closest('.rz-gantt-bar-hover-zone') : null;
+          if (zone) {
+            var rc2 = zone.closest('.rz-gantt-row-container');
+            if (rc2) {
+              var bars2 = rc2.querySelectorAll('.rz-event[data-index]');
+              for (var j = 0; j < bars2.length; j++) {
+                var br2 = bars2[j].getBoundingClientRect();
+                if (e.clientX >= br2.left - 24 && e.clientX <= br2.right + 24 &&
+                    e.clientY >= br2.top && e.clientY <= br2.bottom) {
+                  toBar = bars2[j];
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (toBar && toBar !== depDrag.fromBar && toBar.dataset.index) {
+        var toSide = toHandle ? toHandle.dataset.connectorSide : 'start';
+        var depType = depTypeFromSides(depDrag.fromSide, toSide);
+        var config = getConfig();
+        if (config) {
+          try { suppressDisposed(config.dotnetRef.invokeMethodAsync('OnGanttDependencyCreate', depDrag.fromIndex, parseInt(toBar.dataset.index, 10), depType)); } catch {}
+        }
+      }
+      depDrag = null;
+    }
+
+    // ── Dependency line interactions (click, dblclick, contextmenu) ──────
+    function getDepPath(e) {
+      return e.target.closest('.rz-gantt-link-hit[data-from-index]');
+    }
+
+    function onDepClick(e) {
+      var config = getConfig();
+      if (!config || !config.allowDepInteract) return;
+      var path = getDepPath(e);
+      if (!path) return;
+      var fi = parseInt(path.dataset.fromIndex, 10), ti = parseInt(path.dataset.toIndex, 10), dt = parseInt(path.dataset.linkType, 10) || 0;
+      try { suppressDisposed(config.dotnetRef.invokeMethodAsync('OnGanttDependencyClick', fi, ti, dt, e.clientX, e.clientY)); } catch {}
+    }
+
+    function onDepDblClick(e) {
+      var config = getConfig();
+      if (!config || !config.allowDepInteract) return;
+      var path = getDepPath(e);
+      if (!path) return;
+      e.preventDefault();
+      var fi = parseInt(path.dataset.fromIndex, 10), ti = parseInt(path.dataset.toIndex, 10), dt = parseInt(path.dataset.linkType, 10) || 0;
+      try { suppressDisposed(config.dotnetRef.invokeMethodAsync('OnGanttDependencyDoubleClick', fi, ti, dt, e.clientX, e.clientY)); } catch {}
+    }
+
+    function onDepContextMenu(e) {
+      var config = getConfig();
+      if (!config || !config.allowDepInteract) return;
+      var path = getDepPath(e);
+      if (!path) return;
+      e.preventDefault();
+      var fi = parseInt(path.dataset.fromIndex, 10), ti = parseInt(path.dataset.toIndex, 10), dt = parseInt(path.dataset.linkType, 10) || 0;
+      try { suppressDisposed(config.dotnetRef.invokeMethodAsync('OnGanttDependencyContextMenu', fi, ti, dt, e.clientX, e.clientY)); } catch {}
+    }
+
+    // ── Dependency line hover (tooltip) — pointermove with debounce ──────
+    // pointermove fires once per frame, no flicker from child-element transitions.
+    var depHoverPath = null;
+
+    function onDepPointerMove(e) {
+      var config = getConfig();
+      if (!config || !config.allowDepHover) return;
+
+      var path = e.target.closest ? e.target.closest('.rz-gantt-link-hit[data-from-index]') : null;
+
+      if (path === depHoverPath) return;
+
+      if (depHoverPath) {
+        var fi = parseInt(depHoverPath.dataset.fromIndex, 10), ti = parseInt(depHoverPath.dataset.toIndex, 10), dt = parseInt(depHoverPath.dataset.linkType, 10) || 0;
+        try { suppressDisposed(config.dotnetRef.invokeMethodAsync('OnGanttDependencyMouseLeave', fi, ti, dt, e.clientX, e.clientY)); } catch {}
+      }
+
+      depHoverPath = path;
+
+      if (path) {
+        var fi2 = parseInt(path.dataset.fromIndex, 10), ti2 = parseInt(path.dataset.toIndex, 10), dt2 = parseInt(path.dataset.linkType, 10) || 0;
+        try { suppressDisposed(config.dotnetRef.invokeMethodAsync('OnGanttDependencyMouseEnter', fi2, ti2, dt2, e.clientX, e.clientY)); } catch {}
+      }
+    }
+
+    function onDepPointerLeave(e) {
+      var config = getConfig();
+      if (!config || !config.allowDepHover || !depHoverPath) return;
+      var fi = parseInt(depHoverPath.dataset.fromIndex, 10), ti = parseInt(depHoverPath.dataset.toIndex, 10), dt = parseInt(depHoverPath.dataset.linkType, 10) || 0;
+      try { suppressDisposed(config.dotnetRef.invokeMethodAsync('OnGanttDependencyMouseLeave', fi, ti, dt, e.clientX, e.clientY)); } catch {}
+      depHoverPath = null;
+    }
+
+    // ── Task bar double-click and context menu ────────────────────────────
+    function onTaskDblClick(e) {
+      var config = getConfig();
+      if (!config) return;
+      // Label double-click takes priority (label is outside the bar, not behind hover-zone)
+      if (config.allowTaskLabelDblClick) {
+        var label = e.target.closest('.rz-gantt-bar-label-external[data-index]');
+        if (label) {
+          var lidx = parseInt(label.dataset.index, 10);
+          if (lidx >= 0) {
+            var lr = label.getBoundingClientRect();
+            try { suppressDisposed(config.dotnetRef.invokeMethodAsync('OnGanttTaskLabelDoubleClick', lidx, lr.left, lr.top, lr.width, lr.height)); } catch {}
+            return;
+          }
+        }
+      }
+      if (!config.allowTaskDblClick) return;
+      // Bar may be behind hover-zone overlay
+      var bar = e.target.closest('.rz-event[data-index]');
+      if (!bar) {
+        var zone = e.target.closest('.rz-gantt-bar-hover-zone');
+        if (zone) {
+          var rc = zone.closest('.rz-gantt-row-container');
+          if (rc) bar = rc.querySelector('.rz-event[data-index]');
+        }
+      }
+      if (!bar || !bar.dataset.index) return;
+      var idx = parseInt(bar.dataset.index, 10);
+      try { suppressDisposed(config.dotnetRef.invokeMethodAsync('OnGanttTaskDoubleClick', idx, e.clientX, e.clientY)); } catch {}
+    }
+
+    function onTaskContextMenu(e) {
+      var config = getConfig();
+      if (!config || !config.allowTaskCtxMenu) return;
+      // The hover-zone overlay may intercept the event - find bar via zone or direct hit
+      var bar = e.target.closest('.rz-event[data-index]');
+      if (!bar) {
+        var zone = e.target.closest('.rz-gantt-bar-hover-zone');
+        if (zone) {
+          var rc = zone.closest('.rz-gantt-row-container');
+          if (rc) bar = rc.querySelector('.rz-event[data-index]');
+        }
+      }
+      if (!bar || !bar.dataset.index) return;
+      e.preventDefault();
+      var idx = parseInt(bar.dataset.index, 10);
+      try { suppressDisposed(config.dotnetRef.invokeMethodAsync('OnGanttTaskContextMenu', idx, e.clientX, e.clientY)); } catch {}
+    }
+
     container.addEventListener('mousedown', onMouseDown);
     container.addEventListener('mousemove', onMouseMoveHover);
     container.addEventListener('click', onClickCapture, true);
+    container.addEventListener('mousedown', onDepMouseDown);
+    container.addEventListener('mousedown', onHoverZoneMouseDown);
+    container.addEventListener('click', onDepClick);
+    container.addEventListener('dblclick', onDepDblClick);
+    container.addEventListener('contextmenu', onDepContextMenu);
+    container.addEventListener('dblclick', onTaskDblClick);
+    container.addEventListener('contextmenu', onTaskContextMenu);
+    container.addEventListener('pointermove', onDepPointerMove);
+    container.addEventListener('pointerleave', onDepPointerLeave);
 
     Radzen[key] = {
       container: container,
@@ -601,9 +946,24 @@ window.Radzen = {
       allowDrag: allowDrag,
       allowResize: allowResize,
       rowHeightPx: rowHeightPx || 36,
+      allowDepCreate: allowDepCreate || false,
+      allowDepInteract: allowDepInteract || false,
+      allowDepHover: allowDepHover || false,
+      allowTaskDblClick: allowTaskDblClick || false,
+      allowTaskCtxMenu: allowTaskCtxMenu || false,
+      allowTaskLabelDblClick: allowTaskLabelDblClick || false,
       onMouseDown: onMouseDown,
       onMouseMoveHover: onMouseMoveHover,
-      onClickCapture: onClickCapture
+      onClickCapture: onClickCapture,
+      onDepMouseDown: onDepMouseDown,
+      onHoverZoneMouseDown: onHoverZoneMouseDown,
+      onDepClick: onDepClick,
+      onDepDblClick: onDepDblClick,
+      onDepContextMenu: onDepContextMenu,
+      onTaskDblClick: onTaskDblClick,
+      onTaskContextMenu: onTaskContextMenu,
+      onDepPointerMove: onDepPointerMove,
+      onDepPointerLeave: onDepPointerLeave
     };
   },
   ganttDisposeDragResize: function (containerId) {
@@ -614,6 +974,15 @@ window.Radzen = {
     config.container.removeEventListener('mousedown', config.onMouseDown);
     config.container.removeEventListener('mousemove', config.onMouseMoveHover);
     config.container.removeEventListener('click', config.onClickCapture, true);
+    config.container.removeEventListener('mousedown', config.onDepMouseDown);
+    config.container.removeEventListener('mousedown', config.onHoverZoneMouseDown);
+    config.container.removeEventListener('click', config.onDepClick);
+    config.container.removeEventListener('dblclick', config.onDepDblClick);
+    config.container.removeEventListener('contextmenu', config.onDepContextMenu);
+    config.container.removeEventListener('dblclick', config.onTaskDblClick);
+    config.container.removeEventListener('contextmenu', config.onTaskContextMenu);
+    config.container.removeEventListener('pointermove', config.onDepPointerMove);
+    config.container.removeEventListener('pointerleave', config.onDepPointerLeave);
     delete Radzen[key];
   },
   preventDefaultAndStopPropagation: function (e) {
@@ -3723,7 +4092,7 @@ window.Radzen = {
     var snapThreshold = 0.01;
     function snap(v) { return v < snapThreshold ? 0 : v > 1 - snapThreshold ? 1 : v; }
 
-    // Label state — set by Radzen.updateRangeNavigatorLabels
+    // Label state â€” set by Radzen.updateRangeNavigatorLabels
     ref.navLabelIsDate = false;
     ref.navLabelInputStart = 0;
     ref.navLabelInputEnd = 0;
@@ -4309,7 +4678,7 @@ window.Radzen = {
     ref.addEventListener('click', ref.clickHandler);
     ref.addEventListener('wheel', ref.wheelHandler, { passive: false });
 
-    // Legend hover → series highlight (only when AllowSeriesHover is enabled)
+    // Legend hover â†’ series highlight (only when AllowSeriesHover is enabled)
     ref.legendEnterHandler = function (e) {
       if (!ref.classList.contains('rz-chart-series-hover')) return;
       var legendItem = e.target.closest('.rz-legend-item');
@@ -5484,7 +5853,7 @@ window.Radzen = {
       var label = ref.imageSizeLabel;
 
       if (label && !label.hidden) {
-        label.textContent = Math.round(imgRect.width) + ' × ' + Math.round(imgRect.height);
+        label.textContent = Math.round(imgRect.width) + ' Ã— ' + Math.round(imgRect.height);
         label.classList.toggle('rz-inside', imgRect.bottom + ref.imageSizeLabelSpace > contentRect.bottom);
       }
     };
@@ -5538,7 +5907,7 @@ window.Radzen = {
       label.hidden = !visible;
 
       if (visible) {
-        label.textContent = '0 × 0';
+        label.textContent = '0 Ã— 0';
         ref.imageSizeLabelSpace = label.offsetHeight + parseFloat(getComputedStyle(label).marginTop || 0);
       }
     };

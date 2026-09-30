@@ -109,6 +109,8 @@ $gantt-event-border-radius: var(--rz-border-radius) !default;
     height: var(--rz-gantt-row-height);
     border-bottom: var(--rz-grid-bottom-cell-border);
     background-color: var(--rz-grid-stripe-odd-background-color);
+    // Allow connector handles to extend outside the cell bounds
+    overflow: visible;
   }
 
   .rz-gantt-table-row:last-child > td {
@@ -122,6 +124,7 @@ $gantt-event-border-radius: var(--rz-border-radius) !default;
   .rz-gantt-row-container {
     position: relative;
     height: 100%;
+    overflow: visible;
   }
 
   .rz-gantt-links {
@@ -130,7 +133,12 @@ $gantt-event-border-radius: var(--rz-border-radius) !default;
     top: var(--rz-gantt-header-height, 0px);
     bottom: 0;
     overflow: visible;
+    // pointer-events are none by default; individual paths opt-in when AllowDependencyDelete is active
     pointer-events: none;
+
+    &.rz-gantt-links-interactive {
+      pointer-events: all;
+    }
   }
 
   .rz-gantt-link {
@@ -206,7 +214,7 @@ $gantt-event-border-radius: var(--rz-border-radius) !default;
     border-radius: var(--rz-gantt-event-border-radius);
     background: var(--rz-primary);
     color: var(--rz-on-primary);
-    overflow: hidden;
+    overflow: visible;
     cursor: pointer;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
     padding-block: 0;
@@ -215,6 +223,7 @@ $gantt-event-border-radius: var(--rz-border-radius) !default;
 
     .rz-event-content {
       border-radius: 0;
+      overflow: hidden;
     }
   }
 
@@ -237,6 +246,35 @@ $gantt-event-border-radius: var(--rz-border-radius) !default;
     text-overflow: ellipsis;
     overflow: hidden;
     line-height: calc(0.6 * var(--rz-gantt-row-height));
+  }
+
+  // External label rendered outside the bar (TaskLabelPosition = Right / Left / Auto)
+  .rz-gantt-bar-label-external {
+    position: absolute;
+    white-space: nowrap;
+    font-size: var(--rz-body-font-size);
+    color: var(--rz-text-color);
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    pointer-events: all;
+    user-select: none;
+    z-index: 5;
+    padding: 0 0.25rem;
+
+    &.rz-gantt-bar-label-editable {
+      cursor: text;
+
+      &:hover {
+        text-decoration: underline dotted;
+        color: var(--rz-primary);
+      }
+    }
+  }
+
+  // Hide the internal label when an external label is used
+  .rz-gantt-bar.rz-gantt-label-external .rz-gantt-bar-label {
+    display: none;
   }
 
   .rz-gantt-milestone {
@@ -319,6 +357,60 @@ $gantt-event-border-radius: var(--rz-border-radius) !default;
     padding: 2px 4px;
     background: var(--rz-base-background-color);
     border-radius: var(--rz-border-radius);
+  }
+
+  // ── Interactive dependency connectors ────────────────────────────────────
+
+  // Connector handles: absolutely positioned circles overlaying the bar ends.
+  // Hidden by default; shown when the row-container is hovered.
+  .rz-gantt-row-container:hover .rz-gantt-connector,
+  .rz-gantt-row-container .rz-gantt-connector:hover {
+    display: flex !important;
+  }
+
+  .rz-gantt-connector {
+    display: none;
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--rz-base-background-color);
+    border: 2px solid var(--rz-primary);
+    cursor: crosshair;
+    z-index: 30;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    transform: translateY(-50%);
+    pointer-events: all;
+
+    &:hover {
+      background: var(--rz-primary);
+      transform: translateY(-50%) scale(1.25);
+    }
+  }
+
+  // Highlight a bar that is a valid drop target during dependency drag
+  .rz-gantt-dep-target {
+    outline: 2px solid var(--rz-primary) !important;
+    outline-offset: 2px;
+  }
+
+  // SVG dependency links: wider invisible hit area + hover highlight for delete
+  .rz-gantt-links.rz-gantt-links-interactive {
+    pointer-events: all;
+
+    path[data-from-index] {
+      pointer-events: stroke;
+      cursor: pointer;
+      stroke-width: 8;
+
+      &:hover {
+        stroke: var(--rz-danger);
+        stroke-width: 3;
+        opacity: 0.9;
+      }
+    }
   }
 }
 

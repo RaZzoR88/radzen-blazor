@@ -90,6 +90,10 @@
                                NonWorkingDays=@(Gantt?.TimelineNonWorkingDays)
                                Markers=@(Gantt?.TimelineMarkers)
                                TaskRender=@(Gantt?.TimelineTaskRender)
+                               TaskLabelPosition=@(Gantt?.TimelineTaskLabelPosition ?? GanttTaskLabelPosition.Inside)
+                               AllowDependencyCreate=@(Gantt?.TimelineAllowDependencyCreate ?? false)
+                               AllowDependencyInteraction=@(Gantt?.TimelineAllowDependencyInteraction ?? false)
+                               AllowDependencyHover=@(Gantt?.TimelineAllowDependencyHover ?? false)
                                AppointmentMove=OnAppointmentMove />
         </CascadingValue>;
     }
